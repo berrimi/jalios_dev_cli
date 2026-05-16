@@ -1,0 +1,16 @@
+[project]
+name = "jalios-dev"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["watchdog", "rich", "setproctitle"]
+
+[project.scripts]
+jalios = "jalios_dev.main:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["jalios_dev*"]
