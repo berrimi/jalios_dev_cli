@@ -13,8 +13,8 @@ Development tool for [Jalios JCMS](https://www.jalios.com) plugin projects. Sync
 ## Installation
 
 ```bash
-git clone <repo> ~/jalios-dev
-cd ~/jalios-dev
+git clone git@github.com:berrimi/jalios_dev_cli.git
+cd jalios_dev_cli
 pip install .
 ```
 
@@ -77,7 +77,7 @@ Without `reloadable="true"`, Java changes trigger a full Tomcat restart.
 ## Project Structure
 
 ```
-jalios-dev/
+jalios_dev_cli/
 ├── jalios_dev/
 │   ├── __init__.py    # terminal logging helpers
 │   ├── main.py        # CLI entrypoint, arg parsing
