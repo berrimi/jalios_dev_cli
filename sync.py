@@ -46,7 +46,7 @@ def _validate_sync_paths(src: Path, dst: Path) -> None:
 def _rsync_flags(preview: bool, *, checksum: bool) -> list[str]:
     flags = ["rsync", "-a", "--out-format=%n", *_RSYNC_EXCLUDES]
     if checksum:
-        flags.insert(2, "--checksum")
+        flags.append("--checksum")
     if preview:
         flags.append("--dry-run")
     return flags

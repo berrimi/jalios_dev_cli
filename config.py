@@ -10,6 +10,7 @@ from typing import Any
 
 from jalios_dev import log_info, log_warning
 from jalios_dev.models import AppConfig, ConfigError
+from jalios_dev.sync import resolve_webapp_root
 
 CONFIG_PATH = Path.home() / ".config" / "jalios" / "config.toml"
 LEGACY_CONFIG = Path.home() / ".jalios"
@@ -482,8 +483,6 @@ def load_config(
         restart_patterns=list(global_data.get("restart_patterns", ["*.java", "*.xml", "*.properties", "*.prop"])),
         catalina_base=_catalina_base(workspace),
     )
-    from jalios_dev.sync import resolve_webapp_root
-
     resolve_webapp_root(config)
     return config
 

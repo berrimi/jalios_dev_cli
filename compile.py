@@ -33,10 +33,6 @@ def _extract_classpath(plugin_project: Path, bin_dir: Path) -> str:
     return f"{bin_dir}:{plugin_project / 'WEB-INF/lib'}/*"
 
 
-def _count_class_files(bin_dir: Path) -> int:
-    return sum(1 for _ in bin_dir.rglob("*.class"))
-
-
 def _compile_list(
     config: AppConfig,
     state: RuntimeState,
@@ -104,11 +100,5 @@ def compile_java_files(
         log_info(f"  Compiling {len(java_files)} changed Java file(s)...")
     else:
         log_info(f"  Compiling {len(java_files)} Java files...")
-        state.compiled_files = 0
 
     _compile_list(config, state, java_files, bin_dir)
-
-    if not files:
-        count = _count_class_files(bin_dir)
-        state.compiled_files = count
-        log_success(f"Compilation successful - {count} class files in bin/")

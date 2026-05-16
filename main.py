@@ -24,17 +24,53 @@ from jalios_dev.sync import sync_plugin_to_webapp
 from jalios_dev import watcher as watcher_mod
 
 
+def _show_usage(prog: str = "jalios") -> None:
+    print(f"""\
+Usage: {prog} [COMMAND] [OPTIONS]
+
+COMMANDS:
+    preview    Show what would be synced without changing anything (default)
+    sync       Sync plugin to webapp and compile Java sources
+    run        Sync, compile, start Tomcat, watch files, stream JCMS logs
+
+OPTIONS:
+    -p, --plugin PATH   Path to plugin project directory (auto-detected)
+    -w, --webapp PATH   Path to webapp project directory (auto-detected)
+    -v, --verbose       Enable verbose output
+    -h, --help          Show this help message
+
+CONFIG FILE:
+    {Path.home() / ".config" / "jalios" / "config.toml"}
+    Created automatically on first run with auto-detected settings.
+    Edit to set workspace paths, Tomcat home, Java version, exclusions.
+
+LOG FILES:
+    JCMS Application Log:  <webapp>/WEB-INF/data/logs/jcms.log
+    Tomcat Access Log:      <catalina_base>/logs/catalina.out
+
+    jalios run automatically streams the JCMS log for live feedback.
+
+EXAMPLES:
+    {prog}                        Preview mode (safe, no changes)
+    {prog} sync                   Actually sync and compile
+    {prog} run                    Sync, compile, start server, watch
+    {prog} -p ~/my-plugin -w ~/my-webapp sync""")
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    args = argv if argv is not None else sys.argv[1:]
+    raw = argv if argv is not None else sys.argv[1:]
     command = "preview"
     remaining: list[str] = []
-    for arg in args:
+    for arg in raw:
         if arg in ("preview", "sync", "run"):
             command = arg
+        elif arg in ("-h", "--help"):
+            _show_usage()
+            sys.exit(0)
         else:
             remaining.append(arg)
 
-    parser = argparse.ArgumentParser(prog="jalios")
+    parser = argparse.ArgumentParser(prog="jalios", add_help=False)
     parser.add_argument("-p", "--plugin", type=Path, default=None)
     parser.add_argument("-w", "--webapp", type=Path, default=None)
     parser.add_argument("-v", "--verbose", action="store_true")
