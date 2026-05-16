@@ -37,6 +37,7 @@ class AppConfig:
     restart_patterns: list[str] = field(
         default_factory=lambda: ["*.java", "*.xml", "*.properties", "*.prop"]
     )
+    reloadable: bool = False
     preview_mode: bool = False
     catalina_base: Path | None = None
 

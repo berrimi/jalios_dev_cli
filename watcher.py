@@ -105,8 +105,14 @@ def handle_change(path: str, config: AppConfig, state: RuntimeState) -> None:
     kind = _file_kind(src)
 
     if kind == "java":
-        log_watch(f"{name} changed — compile, sync, restart")
-        _restart_after(config, state, compile_files=[src])
+        compile_java_files(config, state, files=[src])
+        sync_plugin_to_webapp(config, state)
+        if config.reloadable:
+            log_watch(f"{name} changed — compiled, synced (reloadable=true)")
+        else:
+            log_watch(f"{name} changed — restarting server")
+            stop_tomcat()
+            start_server(config)
     elif kind == "restart":
         log_watch(f"{name} changed — sync, restart")
         _restart_after(config, state)

@@ -24,6 +24,15 @@ from jalios_dev.sync import sync_plugin_to_webapp
 from jalios_dev import watcher as watcher_mod
 
 
+def _set_procname(name: str) -> None:
+    try:
+        import setproctitle  # noqa: PLC0415
+
+        setproctitle.setproctitle(name)
+    except Exception:
+        pass
+
+
 def _show_usage(prog: str = "jalios") -> None:
     print(f"""\
 Usage: {prog} [COMMAND] [OPTIONS]
@@ -167,6 +176,7 @@ def _cmd_run(config: AppConfig, state: RuntimeState) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
+    _set_procname("jalios")
     args = _parse_args(argv)
     try:
         config, state = _startup(args)

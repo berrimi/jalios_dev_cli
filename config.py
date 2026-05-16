@@ -415,6 +415,27 @@ def _resolve_webapp_path(
     )
 
 
+def _detect_reloadable(config: AppConfig) -> bool:
+    candidates = [
+        config.webapp_project_root / "META-INF" / "context.xml",
+        config.tomcat_home / "conf" / "context.xml",
+    ]
+    if config.catalina_base and config.catalina_base != config.tomcat_home:
+        candidates.append(
+            config.catalina_base
+            / "conf"
+            / "Catalina"
+            / "localhost"
+            / f"{config.webapp_project_name}.xml"
+        )
+    for path in candidates:
+        if path.is_file():
+            content = path.read_text(encoding="utf-8", errors="replace")
+            if "reloadable=\"true\"" in content or "reloadable='true'" in content:
+                return True
+    return False
+
+
 def _catalina_base(workspace: Path | None) -> Path | None:
     if not workspace:
         return None
@@ -484,6 +505,7 @@ def load_config(
         catalina_base=_catalina_base(workspace),
     )
     resolve_webapp_root(config)
+    config.reloadable = _detect_reloadable(config)
     return config
 
 
