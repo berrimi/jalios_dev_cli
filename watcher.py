@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import fnmatch
+import time
 from pathlib import Path
 from threading import Lock, Timer
-from typing import Callable
+from typing import Callable, Literal
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
@@ -14,13 +14,27 @@ from jalios_dev import log_watch
 from jalios_dev.compile import compile_java_files
 from jalios_dev.models import AppConfig, RuntimeState
 from jalios_dev.server import start_server, stop_tomcat
-from jalios_dev.sync import sync_plugin_to_webapp
+from jalios_dev.sync import sync_changed_file, sync_plugin_to_webapp, sync_static_assets
 
 IGNORE_DIRS = {".git", "bin", ".settings"}
 IGNORE_EXTS = {".class", ".swp", ".swx", ".tmp"}
 IGNORE_NAMES = {".project", ".classpath"}
+_HANDLED_EVENTS = frozenset({"modified", "created", "moved"})
 
+FileKind = Literal["java", "restart", "static"]
 _observer: Observer | None = None
+_COOLDOWN_SEC = 1.0
+
+_RESTART_EXTS = {".xml", ".properties", ".prop"}
+
+
+def _file_kind(path: Path) -> FileKind:
+    ext = path.suffix.lower()
+    if ext == ".java":
+        return "java"
+    if ext in _RESTART_EXTS:
+        return "restart"
+    return "static"
 
 
 class DebouncedHandler(FileSystemEventHandler):
@@ -29,18 +43,22 @@ class DebouncedHandler(FileSystemEventHandler):
         self._lock = Lock()
         self._callback = callback
         self._delay = delay
+        self._pending_path: str | None = None
+        self._cooldown_until = 0.0
 
     def on_any_event(self, event):
         if event.is_directory:
             return
-        if self._should_ignore(event.src_path):
+        if event.event_type not in _HANDLED_EVENTS:
+            return
+        path = getattr(event, "dest_path", None) or event.src_path
+        if self._should_ignore(path):
             return
         with self._lock:
+            self._pending_path = path
             if self._timer:
                 self._timer.cancel()
-            self._timer = Timer(
-                self._delay, self._dispatch, args=[event.src_path]
-            )
+            self._timer = Timer(self._delay, self._dispatch)
             self._timer.start()
 
     def _should_ignore(self, path: str) -> bool:
@@ -51,25 +69,53 @@ class DebouncedHandler(FileSystemEventHandler):
             return True
         return any(part in IGNORE_DIRS for part in p.parts)
 
-    def _dispatch(self, path: str) -> None:
+    def _dispatch(self) -> None:
+        path = self._pending_path
+        if not path:
+            return
+        now = time.monotonic()
+        if now < self._cooldown_until:
+            return
         try:
             self._callback(path)
         except Exception as exc:
             log_watch(f"error during dispatch: {exc}")
+        finally:
+            self._cooldown_until = time.monotonic() + _COOLDOWN_SEC
+            with self._lock:
+                self._pending_path = None
+
+
+def _restart_after(
+    config: AppConfig,
+    state: RuntimeState,
+    *,
+    compile_files: list[Path] | None = None,
+) -> None:
+    stop_tomcat()
+    if compile_files:
+        compile_java_files(config, state, files=compile_files)
+    sync_plugin_to_webapp(config, state)
+    start_server(config)
 
 
 def handle_change(path: str, config: AppConfig, state: RuntimeState) -> None:
-    name = Path(path).name
-    is_restart = any(fnmatch.fnmatch(name, p) for p in config.restart_patterns)
-    if is_restart:
-        log_watch(f"{name} changed — restarting server")
-        stop_tomcat()
-        compile_java_files(config, state)
-        sync_plugin_to_webapp(config, state)
-        start_server(config)
+    src = Path(path)
+    name = src.name
+    kind = _file_kind(src)
+
+    if kind == "java":
+        log_watch(f"{name} changed — compile, sync, restart")
+        _restart_after(config, state, compile_files=[src])
+    elif kind == "restart":
+        log_watch(f"{name} changed — sync, restart")
+        _restart_after(config, state)
     else:
         log_watch(f"{name} changed — syncing")
-        sync_plugin_to_webapp(config, state)
+        before = state.synced_files
+        sync_static_assets(config, state)
+        if state.synced_files == before:
+            sync_changed_file(path, config, state)
 
 
 def start_watcher(config: AppConfig, state: RuntimeState) -> Observer:

@@ -23,9 +23,6 @@ from jalios_dev.server import start_server, stop_tomcat
 from jalios_dev.sync import sync_plugin_to_webapp
 from jalios_dev import watcher as watcher_mod
 
-_CONFIG: AppConfig | None = None
-_SYNC_CONF_NAMES = ("sync.conf", ".sync.conf", ".sync.properties")
-
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = argv if argv is not None else sys.argv[1:]
@@ -51,36 +48,6 @@ def _resolve_path(path: Path, label: str) -> Path:
     if not resolved.is_dir():
         raise ConfigError(f"{label} directory not found: {resolved}")
     return resolved
-
-
-def _find_sync_conf(webapp: Path) -> Path | None:
-    for name in _SYNC_CONF_NAMES:
-        candidate = webapp / name
-        if candidate.is_file():
-            return candidate
-    return None
-
-
-def _parse_sync_conf(config: AppConfig) -> None:
-    conf = _find_sync_conf(config.webapp_project)
-    if not conf:
-        config.webapp_project_root = config.webapp_project
-        return
-
-    config_dir = conf.parent
-    config.webapp_project_root = config_dir
-    for line in conf.read_text(encoding="utf-8", errors="replace").splitlines():
-        if not line.startswith("root.dir"):
-            continue
-        root_dir = line.split("=", 1)[-1].strip().strip("\r")
-        if not root_dir:
-            continue
-        actual = config_dir / root_dir
-        if actual.is_dir():
-            config.webapp_project_root = actual
-        else:
-            log_warning(f"Webapp root directory not found: {actual}")
-        break
 
 
 def _print_banner() -> None:
@@ -116,13 +83,13 @@ def _print_report(config: AppConfig, state: RuntimeState) -> None:
 
 def _startup(args: argparse.Namespace) -> tuple[AppConfig, RuntimeState]:
     log_path = init_logging()
-    config = load_config(args.plugin, args.webapp)
-    validate_config(config)
+    config = load_config(args.plugin, args.webapp, args.command)
+    validate_config(config, args.command)
     config.plugin_project = _resolve_path(config.plugin_project, "Plugin project")
     config.webapp_project = _resolve_path(config.webapp_project, "Webapp project")
-    _parse_sync_conf(config)
     state = RuntimeState(start_time=time.time())
     _print_banner()
+    log_info(f"Sync target : {config.webapp_project_root}")
     log_info(f"Session log: {log_path}")
     if args.verbose:
         log_info("Verbose mode enabled")
@@ -151,8 +118,6 @@ def _cleanup(sig, frame) -> None:
 
 
 def _cmd_run(config: AppConfig, state: RuntimeState) -> None:
-    global _CONFIG
-    _CONFIG = config
     config.preview_mode = False
     stop_tomcat()
     compile_java_files(config, state)

@@ -13,13 +13,30 @@ from jalios_dev import log_error, log_info
 from jalios_dev.models import AppConfig
 
 _console = Console()
-_LEVELS = {
+_LEVEL_STYLES = {
     "INFO": "blue",
     "WARN": "yellow",
     "ERROR": "red",
     "DEBUG": "magenta",
     "FATAL": "bold red",
 }
+_LEVEL_TOKEN_RE = re.compile(
+    r"\[(INFO|WARN|ERROR|DEBUG|FATAL)\]|(?<![\w\[])\b(INFO|WARN|ERROR|DEBUG|FATAL)\b"
+)
+_EXCEPTION_RE = re.compile(
+    r"^[ \t]*("
+    r"[a-zA-Z0-9_.$]+Exception:"
+    r"|[a-zA-Z0-9_.$]+Error:"
+    r"|java\.[a-zA-Z0-9_.$]+Exception"
+    r"|java\.[a-zA-Z0-9_.$]+Error"
+    r"|Caused by:"
+    r"|nested exception is:"
+    r")"
+)
+_READY_RE = re.compile(
+    r"jcms\.ChannelInitServlet.*is ready|is ready.*jcms\.ChannelInitServlet",
+    re.IGNORECASE,
+)
 
 
 def _resolve_log_path(config: AppConfig) -> Path | None:
@@ -35,22 +52,36 @@ def _resolve_log_path(config: AppConfig) -> Path | None:
     return None
 
 
-def _colorize_line(line: str) -> Text:
-    if "ChannelInitServlet" in line and "is ready" in line:
-        return Text(line, style="green")
+def _apply_level_tokens(line: str, default_style: str | None = None) -> Text:
+    """Replace bare INFO with [INFO] (colored); other text uses default_style."""
+    text = Text()
+    last = 0
+    for match in _LEVEL_TOKEN_RE.finditer(line):
+        if match.start() > last:
+            chunk = line[last : match.start()]
+            text.append(chunk, style=default_style)
+        level = match.group(1) or match.group(2)
+        text.append(f"[{level}]", style=_LEVEL_STYLES[level])
+        last = match.end()
+    text.append(line[last:], style=default_style)
+    return text
 
-    if re.search(r"\w+Exception:", line) or "Caused by:" in line:
+
+def _colorize_line(line: str) -> Text:
+    if _READY_RE.search(line):
+        return _apply_level_tokens(line, default_style="green")
+
+    if _EXCEPTION_RE.match(line):
         return Text(line, style="bold red")
 
-    if line.startswith("at com.") or line.startswith("at java."):
-        return Text(line, style="dim")
+    if re.match(r"^[ \t]*at ", line):
+        return Text(line, style="bright_black")
 
-    if re.search(r"\.\.\.\s+\d+\s+more", line):
-        return Text(line, style="dim")
+    if re.match(r"^[ \t]*\.\.\.[ \t]+[0-9]+[ \t]+more", line):
+        return Text(line, style="bright_black")
 
-    for level, style in _LEVELS.items():
-        if re.search(rf"\b{level}\b", line):
-            return Text(line, style=style)
+    if _LEVEL_TOKEN_RE.search(line):
+        return _apply_level_tokens(line)
 
     return Text(line)
 

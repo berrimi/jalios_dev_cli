@@ -37,24 +37,12 @@ def _count_class_files(bin_dir: Path) -> int:
     return sum(1 for _ in bin_dir.rglob("*.class"))
 
 
-def compile_java_files(config: AppConfig, state: RuntimeState) -> None:
-    src_dir = config.plugin_project / "WEB-INF" / "classes"
-    bin_dir = config.plugin_project / "bin"
-
-    if not src_dir.is_dir():
-        log_warning(f"Plugin source directory not found: {src_dir}")
-        return
-
-    java_files = list(src_dir.rglob("*.java"))
-    if not java_files:
-        log_info("No .java files found")
-        return
-
-    if not shutil.which("javac"):
-        log_warning("javac not found - cannot compile")
-        return
-
-    bin_dir.mkdir(parents=True, exist_ok=True)
+def _compile_list(
+    config: AppConfig,
+    state: RuntimeState,
+    java_files: list[Path],
+    bin_dir: Path,
+) -> None:
     tmp = Path(f"/tmp/jalios_compile_{os.getpid()}.txt")
     try:
         tmp.write_text("\n".join(str(f) for f in java_files), encoding="utf-8")
@@ -80,8 +68,47 @@ def compile_java_files(config: AppConfig, state: RuntimeState) -> None:
             for line in lines[:10]:
                 log_warning(f"  {line}")
         else:
-            count = _count_class_files(bin_dir)
-            state.compiled_files = count
-            log_success(f"Compilation successful - {count} class files in bin/")
+            state.compiled_files += len(java_files)
+            log_success(f"Compiled {len(java_files)} file(s)")
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def compile_java_files(
+    config: AppConfig,
+    state: RuntimeState,
+    files: list[Path] | None = None,
+) -> None:
+    src_dir = config.plugin_project / "WEB-INF" / "classes"
+    bin_dir = config.plugin_project / "bin"
+
+    if not src_dir.is_dir():
+        log_warning(f"Plugin source directory not found: {src_dir}")
+        return
+
+    if files:
+        java_files = [f.resolve() for f in files if f.suffix == ".java" and f.is_file()]
+    else:
+        java_files = list(src_dir.rglob("*.java"))
+
+    if not java_files:
+        log_info("No .java files to compile")
+        return
+
+    if not shutil.which("javac"):
+        log_warning("javac not found - cannot compile")
+        return
+
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    if files:
+        log_info(f"  Compiling {len(java_files)} changed Java file(s)...")
+    else:
+        log_info(f"  Compiling {len(java_files)} Java files...")
+        state.compiled_files = 0
+
+    _compile_list(config, state, java_files, bin_dir)
+
+    if not files:
+        count = _count_class_files(bin_dir)
+        state.compiled_files = count
+        log_success(f"Compilation successful - {count} class files in bin/")

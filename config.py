@@ -1,7 +1,9 @@
-"""Load and validate TOML configuration."""
+"""Load, auto-detect, and validate configuration."""
 
 from __future__ import annotations
 
+import os
+import re
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -11,12 +13,42 @@ from jalios_dev.models import AppConfig, ConfigError
 
 CONFIG_PATH = Path.home() / ".config" / "jalios" / "config.toml"
 LEGACY_CONFIG = Path.home() / ".jalios"
-REQUIRED_GLOBAL = (
-    "workspace_path",
-    "tomcat_home",
-    "plugin_project_name",
-    "webapp_project_name",
-)
+_TOMCAT_STANDARD = ("/opt/tomcat", "/usr/local/tomcat", "/usr/share/tomcat")
+
+CONFIG_EXAMPLE = """\
+# Global Jalios dev configuration (see jalios_dev/config.py CONFIG_EXAMPLE)
+
+# Required for `jalios run`
+tomcat_home = "/path/to/apache-tomcat"
+
+# Optional — speeds up auto-detection when set
+# workspace_path = "/path/to/workspace_jalios"
+
+# Optional — override auto-detected plugin project folder name
+# plugin_project_name = "rainbowconnectorsdkv2"
+
+# Optional — override auto-detected webapp project folder name
+# webapp_project_name = "jalios_instance"
+
+# Optional — Java version for javac (default: 11)
+# java_version = "11"
+
+# Optional — directories to exclude from sync
+# excluded_dirs = [".git", "bin", ".settings"]
+
+# Optional — files to exclude from sync
+# excluded_files = [".classpath", ".project"]
+
+# Optional — file patterns that trigger a Tomcat restart (glob)
+# restart_patterns = ["*.java", "*.xml", "*.properties", "*.prop"]
+"""
+
+_LEGACY_MAP = {
+    "WORKSPACE_PATH": "workspace_path",
+    "TOMCAT_HOME": "tomcat_home",
+    "PLUGIN_PROJECT_NAME": "plugin_project_name",
+    "WEBAPP_PROJECT_NAME": "webapp_project_name",
+}
 
 
 def _read_toml(path: Path) -> dict[str, Any]:
@@ -24,99 +56,448 @@ def _read_toml(path: Path) -> dict[str, Any]:
         return tomllib.load(fh)
 
 
-def _merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-    merged = dict(base)
-    merged.update(override)
-    return merged
-
-
-def _check_migration() -> None:
-    if LEGACY_CONFIG.is_file() and not CONFIG_PATH.is_file():
-        raise ConfigError(
-            f"Found legacy shell config at {LEGACY_CONFIG} but no TOML at {CONFIG_PATH}. "
-            "Create ~/.config/jalios/config.toml (see config.toml.example) and migrate settings."
-        )
-
-
-def _load_global() -> dict[str, Any]:
-    _check_migration()
-    if not CONFIG_PATH.is_file():
-        raise ConfigError(f"Missing global config: {CONFIG_PATH}")
-    data = _read_toml(CONFIG_PATH)
-    for key in REQUIRED_GLOBAL:
-        if key not in data or not data[key]:
-            raise ConfigError(f"Missing required field in global config: {key}")
-    return data
-
-
-def _load_local(plugin_dir: Path) -> dict[str, Any]:
-    local = plugin_dir / ".jalios.toml"
-    if not local.is_file():
+def _parse_legacy_shell(path: Path) -> dict[str, str]:
+    if not path.is_file():
         return {}
-    return _read_toml(local)
+    values: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = re.match(r'^([A-Z_]+)=["\']?([^"\']+)["\']?$', line)
+        if match:
+            values[match.group(1)] = match.group(2)
+    return values
 
 
-def _catalina_base(workspace: Path) -> Path | None:
-    wtp = (
-        workspace
-        / ".metadata/.plugins/org.eclipse.wst.server.core/tmp0"
+def _legacy_as_global(legacy: dict[str, str]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for old_key, new_key in _LEGACY_MAP.items():
+        if legacy.get(old_key):
+            out[new_key] = legacy[old_key]
+    return out
+
+
+def _catalina_root(path: Path) -> Path | None:
+    script = path / "bin" / "catalina.sh"
+    return path if script.is_file() else None
+
+
+def _find_catalina_under(root: Path, max_depth: int) -> Path | None:
+    if max_depth < 0 or not root.is_dir():
+        return None
+    found = _catalina_root(root)
+    if found:
+        return found
+    if max_depth == 0:
+        return None
+    try:
+        for child in sorted(root.iterdir()):
+            if child.is_dir() and not child.name.startswith("."):
+                nested = _find_catalina_under(child, max_depth - 1)
+                if nested:
+                    return nested
+    except OSError:
+        pass
+    return None
+
+
+def _detect_tomcat_home(legacy: dict[str, str] | None = None) -> Path | None:
+    env_home = os.environ.get("CATALINA_HOME") or os.environ.get("TOMCAT_HOME")
+    if env_home:
+        found = _catalina_root(Path(env_home).expanduser())
+        if found:
+            return found
+
+    if legacy and legacy.get("TOMCAT_HOME"):
+        found = _catalina_root(Path(legacy["TOMCAT_HOME"]).expanduser())
+        if found:
+            return found
+
+    for path in _TOMCAT_STANDARD:
+        found = _catalina_root(Path(path))
+        if found:
+            return found
+
+    downloads = Path.home() / "Downloads"
+    if downloads.is_dir():
+        for child in sorted(downloads.iterdir()):
+            if not child.is_dir():
+                continue
+            lower = child.name.lower()
+            if "tomcat" in lower or lower.startswith("apache-tomcat"):
+                found = _catalina_root(child)
+                if found:
+                    return found
+        found = _find_catalina_under(downloads, max_depth=3)
+        if found:
+            return found
+
+    home = Path.home()
+    for child in sorted(home.iterdir()):
+        if child.is_dir() and "tomcat" in child.name.lower():
+            found = _catalina_root(child)
+            if found:
+                return found
+
+    return None
+
+
+def _tomcat_valid(data: dict[str, Any]) -> bool:
+    raw = data.get("tomcat_home")
+    if not raw:
+        return False
+    return _catalina_root(Path(str(raw)).expanduser()) is not None
+
+
+def _write_global_config(values: dict[str, Any]) -> None:
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "# Auto-generated by jalios",
+        "# Template: jalios_dev/config.py CONFIG_EXAMPLE",
+        "",
+    ]
+    if values.get("tomcat_home"):
+        lines.append(f'tomcat_home = "{values["tomcat_home"]}"')
+    for key in ("workspace_path", "plugin_project_name", "webapp_project_name", "java_version"):
+        if values.get(key):
+            lines.append(f'{key} = "{values[key]}"')
+    for key in ("excluded_dirs", "excluded_files", "restart_patterns"):
+        if values.get(key):
+            lines.append(f'{key} = {values[key]}')
+    lines.append("")
+    CONFIG_PATH.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _build_initial_global(cwd: Path) -> dict[str, Any]:
+    legacy = _parse_legacy_shell(LEGACY_CONFIG)
+    values: dict[str, Any] = dict(_legacy_as_global(legacy))
+
+    workspace = _detect_workspace(cwd)
+    if workspace:
+        values["workspace_path"] = str(workspace)
+    elif values.get("workspace_path"):
+        values["workspace_path"] = str(Path(values["workspace_path"]).expanduser())
+
+    tomcat = _detect_tomcat_home(legacy)
+    if tomcat:
+        values["tomcat_home"] = str(tomcat)
+
+    values.setdefault("java_version", "11")
+
+    return values
+
+
+def _refresh_global_values(data: dict[str, Any], cwd: Path) -> dict[str, Any]:
+    legacy = _parse_legacy_shell(LEGACY_CONFIG)
+    updated = dict(data)
+
+    if not _tomcat_valid(updated):
+        tomcat = _detect_tomcat_home(legacy)
+        if tomcat:
+            updated["tomcat_home"] = str(tomcat)
+            log_info(f"Auto-detected Tomcat: {tomcat}")
+
+    if not updated.get("workspace_path"):
+        workspace = _detect_workspace(cwd)
+        if workspace:
+            updated["workspace_path"] = str(workspace)
+        elif legacy.get("WORKSPACE_PATH"):
+            updated["workspace_path"] = legacy["WORKSPACE_PATH"]
+
+    if updated != data:
+        _write_global_config(updated)
+        log_info(f"Updated global config at {CONFIG_PATH}")
+    return updated
+
+
+def _ensure_global_config(cwd: Path) -> dict[str, Any]:
+    if not CONFIG_PATH.is_file():
+        values = _build_initial_global(cwd)
+        _write_global_config(values)
+        if LEGACY_CONFIG.is_file():
+            log_info(f"Migrated settings from {LEGACY_CONFIG}")
+        log_info(f"Created global config at {CONFIG_PATH}")
+        return _read_toml(CONFIG_PATH)
+
+    data = _read_toml(CONFIG_PATH)
+    return _refresh_global_values(data, cwd)
+
+
+def _is_plugin_dir(path: Path) -> bool:
+    if not path.is_dir():
+        return False
+    if (path / ".classpath").is_file():
+        return True
+    if (path / "plugin.xml").is_file():
+        return True
+    if (path / "WEB-INF").is_dir() and (path / "plugins").is_dir():
+        return True
+    nested = path / "WEB-INF" / "plugins"
+    return any(nested.glob("*/plugin.xml"))
+
+
+def _has_web_xml(path: Path) -> bool:
+    if (path / "WEB-INF" / "web.xml").is_file():
+        return True
+    for webxml in path.rglob("WEB-INF/web.xml"):
+        if len(webxml.relative_to(path).parts) <= 4:
+            return True
+    return False
+
+
+def _is_webapp_dir(path: Path) -> bool:
+    if not path.is_dir():
+        return False
+    if (path / "sync.conf").is_file():
+        return True
+    if _has_web_xml(path):
+        return True
+    name = path.name.lower()
+    return "jalios" in name or "instance" in name
+
+
+def _walk_up(start: Path) -> list[Path]:
+    chain: list[Path] = []
+    current = start.resolve()
+    for _ in range(12):
+        chain.append(current)
+        if current.parent == current:
+            break
+        current = current.parent
+    return chain
+
+
+def _detect_workspace(cwd: Path) -> Path | None:
+    for directory in _walk_up(cwd):
+        children = [p for p in directory.iterdir() if p.is_dir()]
+        plugins = [p for p in children if _is_plugin_dir(p)]
+        webapps = [p for p in children if _is_webapp_dir(p)]
+        if plugins and webapps:
+            return directory
+    return None
+
+
+def _scan_workspace(workspace: Path, kind: str) -> Path | None:
+    if not workspace.is_dir():
+        return None
+    checker = _is_plugin_dir if kind == "plugin" else _is_webapp_dir
+    for child in sorted(workspace.iterdir()):
+        if child.is_dir() and checker(child):
+            return child
+    return None
+
+
+def _detect_plugin(cwd: Path, workspace: Path | None) -> Path | None:
+    for directory in _walk_up(cwd):
+        if _is_plugin_dir(directory):
+            log_info(f"Auto-detected plugin project: {directory}")
+            return directory
+    if workspace:
+        found = _scan_workspace(workspace, "plugin")
+        if found:
+            log_info(f"Auto-detected plugin project: {found}")
+            return found
+    return None
+
+
+def _detect_webapp(
+    plugin: Path,
+    workspace: Path | None,
+) -> Path | None:
+    parent = plugin.parent
+    for sibling in sorted(parent.iterdir()):
+        if not sibling.is_dir() or sibling == plugin:
+            continue
+        if _is_webapp_dir(sibling):
+            log_info(f"Auto-detected webapp project: {sibling}")
+            return sibling
+    if workspace:
+        found = _scan_workspace(workspace, "webapp")
+        if found:
+            log_info(f"Auto-detected webapp project: {found}")
+            return found
+    return None
+
+
+def _resolve_plugin_name(
+    plugin_project: Path,
+    global_data: dict[str, Any],
+) -> str:
+    plugins_dir = plugin_project / "plugins"
+    if plugins_dir.is_dir():
+        for child in sorted(plugins_dir.iterdir()):
+            if child.is_dir():
+                return child.name
+    if global_data.get("plugin_project_name"):
+        return str(global_data["plugin_project_name"])
+    return plugin_project.name
+
+
+def _config_plugin_path(
+    workspace: Path | None,
+    global_data: dict[str, Any],
+) -> Path | None:
+    name = global_data.get("plugin_project_name")
+    if workspace and name:
+        candidate = workspace / str(name)
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
+def _config_webapp_path(
+    workspace: Path | None,
+    global_data: dict[str, Any],
+) -> Path | None:
+    name = global_data.get("webapp_project_name")
+    if workspace and name:
+        candidate = workspace / str(name)
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
+def _cwd_plugin(cwd: Path) -> Path | None:
+    for directory in _walk_up(cwd):
+        if _is_plugin_dir(directory):
+            return directory
+    return None
+
+
+def _resolve_plugin_path(
+    override: Path | None,
+    cwd: Path,
+    global_data: dict[str, Any],
+    workspace: Path | None,
+) -> Path:
+    if override:
+        return override.expanduser()
+
+    configured = _config_plugin_path(workspace, global_data)
+    if configured:
+        cwd_plugin = _cwd_plugin(cwd)
+        if cwd_plugin and cwd_plugin.resolve() != configured.resolve():
+            log_warning(
+                f"Config plugin is {configured} (ignoring CWD at {cwd_plugin})"
+            )
+        log_info(f"Plugin project: {configured}")
+        return configured
+
+    detected = _detect_plugin(cwd, workspace)
+    if detected:
+        return detected
+    raise ConfigError(
+        "Cannot resolve plugin project. Run from a plugin directory or use -p."
     )
+
+
+def _resolve_webapp_path(
+    override: Path | None,
+    plugin: Path,
+    global_data: dict[str, Any],
+    workspace: Path | None,
+) -> Path:
+    if override:
+        return override.expanduser()
+
+    configured = _config_webapp_path(workspace, global_data)
+    if configured:
+        log_info(f"Webapp project: {configured}")
+        return configured
+
+    detected = _detect_webapp(plugin, workspace)
+    if detected:
+        return detected
+    raise ConfigError(
+        "Cannot resolve webapp project. Use -w or set webapp_project_name in config."
+    )
+
+
+def _catalina_base(workspace: Path | None) -> Path | None:
+    if not workspace:
+        return None
+    wtp = workspace / ".metadata/.plugins/org.eclipse.wst.server.core/tmp0"
     return wtp if wtp.is_dir() else None
 
 
 def load_config(
     plugin_override: Path | None,
     webapp_override: Path | None,
+    command: str,
 ) -> AppConfig:
-    global_data = _load_global()
-    workspace = Path(global_data["workspace_path"]).expanduser()
-    tomcat_home = Path(global_data["tomcat_home"]).expanduser()
-    plugin_name = str(global_data["plugin_project_name"])
-    webapp_name = str(global_data["webapp_project_name"])
-    java_version = str(global_data.get("java_version", "11"))
+    cwd = Path.cwd()
+    global_data = _ensure_global_config(cwd)
 
-    plugin_project = (
-        plugin_override.expanduser()
-        if plugin_override
-        else workspace / plugin_name
-    )
-    webapp_project = (
-        webapp_override.expanduser()
-        if webapp_override
-        else workspace / webapp_name
+    workspace_raw = global_data.get("workspace_path")
+    workspace = (
+        Path(str(workspace_raw)).expanduser()
+        if workspace_raw
+        else _detect_workspace(cwd)
     )
 
-    local_data = _load_local(plugin_project)
-    merged = _merge(
-        {
-            "java_version": java_version,
-            "excluded_dirs": [".git", "bin", ".settings"],
-            "excluded_files": [".classpath", ".project"],
-            "restart_patterns": ["*.java", "*.xml", "*.properties", "*.prop"],
-        },
-        local_data,
+    plugin_project = _resolve_plugin_path(
+        plugin_override, cwd, global_data, workspace
+    )
+    webapp_project = _resolve_webapp_path(
+        webapp_override, plugin_project, global_data, workspace
     )
 
-    return AppConfig(
+    plugin_name = _resolve_plugin_name(plugin_project, global_data)
+    java_version = global_data.get("java_version")
+    if not java_version:
+        raise ConfigError(
+            f"java_version not found in {CONFIG_PATH}. "
+            f"Add java_version = \"11\" to the config file."
+        )
+    java_version = str(java_version)
+
+    tomcat_raw = global_data.get("tomcat_home")
+    tomcat_home = (
+        Path(str(tomcat_raw)).expanduser() if tomcat_raw else None
+    )
+
+    if command == "run" and (
+        not tomcat_home or not (tomcat_home / "bin" / "catalina.sh").is_file()
+    ):
+        raise ConfigError(
+            f"Tomcat not found. Set tomcat_home in {CONFIG_PATH} "
+            f"(see CONFIG_EXAMPLE in jalios_dev/config.py)"
+        )
+
+    if not workspace:
+        workspace = plugin_project.parent
+
+    config = AppConfig(
         workspace_path=workspace,
-        tomcat_home=tomcat_home,
+        tomcat_home=tomcat_home or Path(),
         plugin_project=plugin_project,
         webapp_project=webapp_project,
         webapp_project_root=webapp_project,
         plugin_project_name=plugin_name,
-        webapp_project_name=webapp_name,
-        java_version=str(merged.get("java_version", "11")),
-        excluded_dirs=list(merged.get("excluded_dirs", [])),
-        excluded_files=list(merged.get("excluded_files", [])),
-        restart_patterns=list(merged.get("restart_patterns", [])),
+        webapp_project_name=webapp_project.name,
+        java_version=java_version,
+        excluded_dirs=list(global_data.get("excluded_dirs", [".git", "bin", ".settings"])),
+        excluded_files=list(global_data.get("excluded_files", [".classpath", ".project"])),
+        restart_patterns=list(global_data.get("restart_patterns", ["*.java", "*.xml", "*.properties", "*.prop"])),
         catalina_base=_catalina_base(workspace),
     )
+    from jalios_dev.sync import resolve_webapp_root
+
+    resolve_webapp_root(config)
+    return config
 
 
-def validate_config(config: AppConfig) -> None:
-    for label, path in (
-        ("workspace_path", config.workspace_path),
-        ("tomcat_home", config.tomcat_home),
-    ):
-        if not path.exists():
-            raise ConfigError(f"{label} does not exist: {path}")
+def validate_config(config: AppConfig, command: str) -> None:
+    if not config.plugin_project.is_dir():
+        raise ConfigError(
+            f"Plugin project directory not found: {config.plugin_project}"
+        )
+    if not config.webapp_project.is_dir():
+        raise ConfigError(
+            f"Webapp project directory not found: {config.webapp_project}"
+        )
+    if command == "run":
+        catalina = config.tomcat_home / "bin" / "catalina.sh"
+        if not config.tomcat_home or not catalina.is_file():
+            raise ConfigError(f"Set tomcat_home in {CONFIG_PATH}")

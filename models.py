@@ -18,15 +18,7 @@ class SyncError(JaliosError):
     pass
 
 
-class CompileError(JaliosError):
-    pass
-
-
 class ServerError(JaliosError):
-    pass
-
-
-class WatcherError(JaliosError):
     pass
 
 
