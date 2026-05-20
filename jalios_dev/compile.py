@@ -8,7 +8,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from jalios_dev import log_info, log_success, log_warning
+from jalios_dev import log_debug, log_info, log_success, log_warning
 from jalios_dev.models import AppConfig, RuntimeState
 
 _PATH_RE = re.compile(r'path="([^"]*)"')
@@ -38,7 +38,7 @@ def _compile_list(
     state: RuntimeState,
     java_files: list[Path],
     bin_dir: Path,
-) -> None:
+) -> bool:
     tmp = Path(f"/tmp/jalios_compile_{os.getpid()}.txt")
     try:
         tmp.write_text("\n".join(str(f) for f in java_files), encoding="utf-8")
@@ -55,6 +55,7 @@ def _compile_list(
             config.java_version,
             f"@{tmp}",
         ]
+        log_debug(f"javac command: {' '.join(cmd)}")
         result = subprocess.run(cmd, capture_output=True, text=True)
         output = (result.stdout + result.stderr).strip()
         if result.returncode != 0:
@@ -63,9 +64,10 @@ def _compile_list(
             log_warning(f"Compilation had {len(errors) or len(lines)} errors:")
             for line in lines[:10]:
                 log_warning(f"  {line}")
-        else:
-            state.compiled_files += len(java_files)
-            log_success(f"Compiled {len(java_files)} file(s)")
+            return False
+        state.compiled_files += len(java_files)
+        log_success(f"Compiled {len(java_files)} file(s)")
+        return True
     finally:
         tmp.unlink(missing_ok=True)
 
@@ -74,13 +76,13 @@ def compile_java_files(
     config: AppConfig,
     state: RuntimeState,
     files: list[Path] | None = None,
-) -> None:
+) -> bool:
     src_dir = config.plugin_project / "WEB-INF" / "classes"
     bin_dir = config.plugin_project / "bin"
 
     if not src_dir.is_dir():
         log_warning(f"Plugin source directory not found: {src_dir}")
-        return
+        return True
 
     if files:
         java_files = [f.resolve() for f in files if f.suffix == ".java" and f.is_file()]
@@ -89,11 +91,11 @@ def compile_java_files(
 
     if not java_files:
         log_info("No .java files to compile")
-        return
+        return True
 
     if not shutil.which("javac"):
         log_warning("javac not found - cannot compile")
-        return
+        return False
 
     bin_dir.mkdir(parents=True, exist_ok=True)
     if files:
@@ -101,4 +103,4 @@ def compile_java_files(
     else:
         log_info(f"  Compiling {len(java_files)} Java files...")
 
-    _compile_list(config, state, java_files, bin_dir)
+    return _compile_list(config, state, java_files, bin_dir)

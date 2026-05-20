@@ -5,7 +5,10 @@ from __future__ import annotations
 import argparse
 import signal
 import sys
+import termios
+import threading
 import time
+import tty
 from pathlib import Path
 
 from jalios_dev import (
@@ -127,8 +130,9 @@ def _print_report(config: AppConfig, state: RuntimeState) -> None:
 
 
 def _startup(args: argparse.Namespace) -> tuple[AppConfig, RuntimeState]:
-    log_path = init_logging()
+    log_path = init_logging(verbose=args.verbose)
     config = load_config(args.plugin, args.webapp, args.command)
+    config.verbose = args.verbose
     validate_config(config, args.command)
     config.plugin_project = _resolve_path(config.plugin_project, "Plugin project")
     config.webapp_project = _resolve_path(config.webapp_project, "Webapp project")
@@ -136,7 +140,7 @@ def _startup(args: argparse.Namespace) -> tuple[AppConfig, RuntimeState]:
     _print_banner()
     log_info(f"Sync target : {config.webapp_project_root}")
     log_info(f"Session log: {log_path}")
-    if args.verbose:
+    if config.verbose:
         log_info("Verbose mode enabled")
     return config, state
 
@@ -149,8 +153,11 @@ def _cmd_preview(config: AppConfig, state: RuntimeState) -> None:
 
 def _cmd_sync(config: AppConfig, state: RuntimeState) -> None:
     config.preview_mode = False
-    compile_java_files(config, state)
-    sync_plugin_to_webapp(config, state)
+    compile_ok = compile_java_files(config, state)
+    if compile_ok:
+        sync_plugin_to_webapp(config, state)
+    else:
+        log_warning("Compilation failed — skipping sync to avoid deploying stale classes")
     _print_report(config, state)
 
 
@@ -162,17 +169,69 @@ def _cleanup(sig, frame) -> None:
     sys.exit(0)
 
 
+def _safe_restart(config: AppConfig, state: RuntimeState) -> None:
+    log_info("Restarting Tomcat...")
+    watcher_mod.stop_watcher()
+    stop_tomcat()
+    compile_ok = compile_java_files(config, state)
+    if compile_ok:
+        sync_plugin_to_webapp(config, state)
+    else:
+        log_warning("Compilation failed — skipping sync")
+    start_server(config)
+    watcher_mod.start_watcher(config, state)
+
+
+def _listen_for_restart(config: AppConfig, state: RuntimeState) -> None:
+    """Stream logs in a thread while listening for Ctrl+R on the main thread."""
+    fd = sys.stdin.fileno()
+    try:
+        old = termios.tcgetattr(fd)
+    except (OSError, termios.error):
+        old = None
+
+    try:
+        if old is not None:
+            tty.setcbreak(fd)
+
+        log_thread = threading.Thread(
+            target=watch_server_logs, args=(config,), daemon=True
+        )
+        log_thread.start()
+
+        log_info("Tomcat is running — Press Ctrl+R to restart, Ctrl+C to quit.")
+
+        while True:
+            try:
+                ch = sys.stdin.read(1)
+            except (OSError, ValueError):
+                break
+            if not ch:
+                break
+            if ch == "\x12":  # Ctrl+R
+                _safe_restart(config, state)
+    finally:
+        if old is not None:
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            except (OSError, termios.error):
+                pass
+
+
 def _cmd_run(config: AppConfig, state: RuntimeState) -> None:
     config.preview_mode = False
     stop_tomcat()
-    compile_java_files(config, state)
-    sync_plugin_to_webapp(config, state)
+    compile_ok = compile_java_files(config, state)
+    if compile_ok:
+        sync_plugin_to_webapp(config, state)
+    else:
+        log_warning("Compilation failed — skipping sync to avoid deploying stale classes")
     _print_report(config, state)
     start_server(config)
     watcher_mod.start_watcher(config, state)
     signal.signal(signal.SIGINT, _cleanup)
     signal.signal(signal.SIGTERM, _cleanup)
-    watch_server_logs(config)
+    _listen_for_restart(config, state)
 
 
 def main(argv: list[str] | None = None) -> None:

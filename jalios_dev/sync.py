@@ -6,7 +6,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from jalios_dev import log_info, log_sync, log_warning
+from jalios_dev import log_debug, log_info, log_sync, log_warning
 from jalios_dev.models import AppConfig, RuntimeState, SyncError
 
 _RSYNC_EXCLUDES = ["--exclude=.git", "--exclude=.svn"]
@@ -96,8 +96,10 @@ def _run_rsync(
     _validate_sync_paths(src, dst)
     dst.mkdir(parents=True, exist_ok=True)
     flags = _rsync_flags(config.preview_mode, checksum=checksum)
+    cmd = flags + [f"{src}/", f"{dst}/"]
+    log_debug(f"rsync: {' '.join(str(c) for c in cmd)}")
     result = subprocess.run(
-        flags + [f"{src}/", f"{dst}/"],
+        cmd,
         capture_output=True,
         text=True,
     )

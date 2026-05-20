@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import os
 import re
-import tomllib
+import sys
 from pathlib import Path
 from typing import Any
 
-from jalios_dev import log_info, log_warning
+import tomllib as _tomllib
+
+from jalios_dev import log_error, log_info, log_warning
 from jalios_dev.models import AppConfig, ConfigError
 from jalios_dev.sync import resolve_webapp_root
 
@@ -53,8 +55,13 @@ _LEGACY_MAP = {
 
 
 def _read_toml(path: Path) -> dict[str, Any]:
-    with path.open("rb") as fh:
-        return tomllib.load(fh)
+    try:
+        with path.open("rb") as fh:
+            return _tomllib.load(fh)
+    except _tomllib.TOMLDecodeError as exc:
+        log_error(f"Config file is corrupted: {path}")
+        log_error(str(exc))
+        sys.exit(1)
 
 
 def _parse_legacy_shell(path: Path) -> dict[str, str]:
@@ -466,13 +473,7 @@ def load_config(
     )
 
     plugin_name = _resolve_plugin_name(plugin_project, global_data)
-    java_version = global_data.get("java_version")
-    if not java_version:
-        raise ConfigError(
-            f"java_version not found in {CONFIG_PATH}. "
-            f"Add java_version = \"11\" to the config file."
-        )
-    java_version = str(java_version)
+    java_version = str(global_data.get("java_version", "11") or "11")
 
     tomcat_raw = global_data.get("tomcat_home")
     tomcat_home = (

@@ -9,11 +9,13 @@ from rich.console import Console
 
 _console = Console()
 _log_file: Path | None = None
+_verbose: bool = False
 
 
-def init_logging() -> Path:
-    global _log_file
+def init_logging(*, verbose: bool = False) -> Path:
+    global _log_file, _verbose
     _log_file = Path(f"/tmp/jalios_sync_{int(time.time())}.log")
+    _verbose = verbose
     return _log_file
 
 
@@ -46,3 +48,8 @@ def log_sync(msg: str) -> None:
 
 def log_watch(msg: str) -> None:
     _write(f"[magenta][WATCH][/magenta] {msg}", f"[WATCH] {msg}")
+
+
+def log_debug(msg: str) -> None:
+    if _verbose:
+        _write(f"[dim][DEBUG][/dim] {msg}", f"[DEBUG] {msg}")
