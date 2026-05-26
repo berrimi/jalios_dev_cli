@@ -40,6 +40,7 @@ class AppConfig:
     reloadable: bool = False
     preview_mode: bool = False
     verbose: bool = False
+    copy_class_to_source: bool = False
     catalina_base: Path | None = None
 
 

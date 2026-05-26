@@ -49,6 +49,7 @@ OPTIONS:
     -p, --plugin PATH   Path to plugin project directory (auto-detected)
     -w, --webapp PATH   Path to webapp project directory (auto-detected)
     -v, --verbose       Enable verbose output
+    --class             Copy .class files alongside .java sources in WEB-INF/classes/
     -h, --help          Show this help message
 
 CONFIG FILE:
@@ -86,6 +87,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("-p", "--plugin", type=Path, default=None)
     parser.add_argument("-w", "--webapp", type=Path, default=None)
     parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument("--class", dest="copy_class", action="store_true")
     ns = parser.parse_args(remaining)
     ns.command = command
     return ns
@@ -133,6 +135,7 @@ def _startup(args: argparse.Namespace) -> tuple[AppConfig, RuntimeState]:
     log_path = init_logging(verbose=args.verbose)
     config = load_config(args.plugin, args.webapp, args.command)
     config.verbose = args.verbose
+    config.copy_class_to_source = args.copy_class
     validate_config(config, args.command)
     config.plugin_project = _resolve_path(config.plugin_project, "Plugin project")
     config.webapp_project = _resolve_path(config.webapp_project, "Webapp project")

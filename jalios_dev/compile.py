@@ -8,7 +8,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from jalios_dev import log_debug, log_info, log_success, log_warning
+from jalios_dev import log_debug, log_info, log_success, log_sync, log_warning
 from jalios_dev.models import AppConfig, RuntimeState
 
 _PATH_RE = re.compile(r'path="([^"]*)"')
@@ -72,6 +72,26 @@ def _compile_list(
         tmp.unlink(missing_ok=True)
 
 
+def _copy_class_to_source(
+    java_files: list[Path],
+    bin_dir: Path,
+    src_dir: Path,
+) -> None:
+    src_dir_resolved = src_dir.resolve()
+    for java_file in java_files:
+        try:
+            rel = java_file.resolve().relative_to(src_dir_resolved)
+        except ValueError:
+            continue
+        pkg = rel.parent
+        stem = rel.stem
+        for bin_class in bin_dir.glob(str(Path(pkg) / f"{stem}*.class")):
+            dst = src_dir / bin_class.relative_to(bin_dir)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(bin_class, dst)
+            log_sync(f"[class] {bin_class} → {dst}")
+
+
 def compile_java_files(
     config: AppConfig,
     state: RuntimeState,
@@ -98,9 +118,13 @@ def compile_java_files(
         return False
 
     bin_dir.mkdir(parents=True, exist_ok=True)
+    src_dir_resolved = src_dir.resolve()
     if files:
         log_info(f"  Compiling {len(java_files)} changed Java file(s)...")
     else:
         log_info(f"  Compiling {len(java_files)} Java files...")
 
-    return _compile_list(config, state, java_files, bin_dir)
+    ok = _compile_list(config, state, java_files, bin_dir)
+    if ok and config.copy_class_to_source:
+        _copy_class_to_source(java_files, bin_dir, src_dir_resolved)
+    return ok
